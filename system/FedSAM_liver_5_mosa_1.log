@@ -1,0 +1,21 @@
+==================================================
+Algorithm: FedMoSA
+Local batch size: 8
+Local steps: 2
+Local learing rate: 0.0001
+Total number of clients: 5
+Clients join in each round: 1
+Global rounds: 5
+Running times: 1
+Dataset: liver_seg
+Local model: mosa
+Using device: cuda
+==================================================
+
+============= Running time: [1th/1] =============
+Creating server and clients ...
+Default number of threads: 192
+Finished creating server and clients.
+
+------------- Round number: [  1/5]-------------
+==> Training for 5 clients...
