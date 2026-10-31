@@ -6,7 +6,7 @@ import random
 import torch.nn.functional as F
 from torch.utils.data import DataLoader, RandomSampler, Dataset
 from concurrent.futures import ThreadPoolExecutor
-from utils.data_utils import read_client_data
+from utils.data_utils import read_client_data, train_seed, epoch_subset, subset_counts
 from ..trainmodel.models import *
 import torchvision.transforms as transforms
 import torch
@@ -185,6 +185,25 @@ class TopIoUOverlayCollector:
                     os.path.join(dataset_dir, f"{base}_{tag}_gt.png")
                 )
 
+def collate_lists(batch):
+    """[(img, mask, mod), ...] -> [imgs, masks, mods] as lists (what the default collate gave for path strings)."""
+    return [list(v) for v in zip(*batch)]
+
+
+class EpochLoader:
+    """Iterable training loader: each iteration (= one local epoch) uses a fresh random subset of the training
+    volumes' slices. The k-th pass in round r uses the seed train_seed(dataset, run, client, r, k)."""
+    def __init__(self, client, batch_size, shuffle=True):
+        self.client, self.batch_size, self.shuffle = client, batch_size, shuffle
+        self.epoch = 0
+
+    def __iter__(self):
+        c = self.client
+        seed = train_seed(c.dataset, c.dataset_id, c.id, c.current_round, self.epoch)
+        self.epoch += 1
+        return iter(c._epoch_loader(epoch_subset(c.train_volumes, seed), self.batch_size, self.shuffle))
+
+
 class MergedDataset(Dataset):
     def __init__(self, datasets_by_modality, batch_size):
         self.batch_size = batch_size
@@ -279,7 +298,8 @@ class Client(object):
         if shared_model is not None:
             self.model = copy.deepcopy(shared_model)
 
-        self.train_data = None
+        self.train_data = None          # the current epoch's training subset
+        self.train_volumes = None       # all training slices, per volume (subsampled afresh every epoch)
         self.test_data = None
         self.val_data = None
 
@@ -321,6 +341,7 @@ class Client(object):
             torch.cuda.manual_seed_all(seed)
         torch.backends.cudnn.enabled = False
         torch.backends.cudnn.benchmark = False
+        torch.backends.cudnn.deterministic = True
 
     def compute_prototype_alignment_loss(self):
         if self.global_shared_prototypes is None:
@@ -348,26 +369,29 @@ class Client(object):
             return None
 
         return proto_loss / count
-        torch.backends.cudnn.deterministic = True
 
     def load_train_data(self, batch_size=None, shuffle=True):
+        """Training loader of this round. Every pass over it (one local epoch) draws a fresh random 25% of the slices
+        of every training volume (seeded by dataset, run, client, round and epoch), then batches them as before."""
         if batch_size is None:
             batch_size = self.batch_size
 
-        self.train_data = read_client_data(self.dataset, self.current_round, self.id, self.dataset_id, data_split='train') if self.train_data is None else self.train_data
-        self.train_samples = len(self.train_data)
+        if self.train_volumes is None:
+            self.train_volumes = read_client_data(self.dataset, self.current_round, self.id, self.dataset_id,
+                                                  data_split='train')
+        counts = subset_counts(self.train_volumes)
+        self.train_samples = sum(counts.values())
+        self.mod_sample_count = {m: 0 for m in self.args.mod_list}
+        self.mod_sample_count.update(counts)
+        return EpochLoader(self, batch_size, shuffle)
 
+    def _epoch_loader(self, data, batch_size, shuffle):
+        """DataLoader over one epoch's subset (same batching as before)."""
+        self.train_data = data
         if self.args.model_name == "mosa":
             modality_data = {}
-            for item in self.train_data:
+            for item in data:
                 modality_data.setdefault(item[2], []).append(item)
-
-            self.mod_sample_count = {m: 0 for m in self.args.mod_list}
-            for item in self.train_data:
-                m = item[2]
-                if m in modality_data:
-                    modality_data[m].append(item)
-                    self.mod_sample_count[m] += 1
 
             if shuffle:
                 for m in modality_data:
@@ -382,8 +406,8 @@ class Client(object):
             merged_dataset = MergedDataset(modality_data, batch_size=batch_size)
             return DataLoader(merged_dataset, batch_size=1, shuffle=False, collate_fn=lambda batch: batch[0])
 
-        batch_size = min(batch_size, len(self.train_data))
-        return DataLoader(self.train_data, batch_size, drop_last=True, shuffle=shuffle)
+        batch_size = min(batch_size, len(data))
+        return DataLoader(data, batch_size, drop_last=True, shuffle=shuffle, collate_fn=collate_lists)
 
 
     def load_test_data(self, batch_size=None, ood=False):
@@ -434,7 +458,7 @@ class Client(object):
             return DataLoader(merged_dataset, batch_size=1, shuffle=False, collate_fn=lambda batch: batch[0])
 
         batch_size = min(batch_size, len(self.val_data))
-        return DataLoader(self.val_data, batch_size, drop_last=False, shuffle=False)
+        return DataLoader(self.val_data, batch_size, drop_last=False, shuffle=False, collate_fn=collate_lists)
 
     def test_metrics(self, temp_model=None, val=True, ood = False):
         if val:
@@ -464,7 +488,8 @@ class Client(object):
                     modality = z[0]
                     model.set_modality(modality)
 
-                output = model(x)
+                # do not add validation/test features to the shared prototypes sent to the server
+                output = model(x, collect_proto=False) if self.args.model_name == "mosa" else model(x)
                 # Main segmentation loss
                 bce_loss = self.bce(output, y_true)
                 dice_loss = self.dice(output, y_true)
@@ -518,27 +543,27 @@ class Client(object):
         model = self.model_per if hasattr(self, "model_per") else self.model
         return model
 
-    def load_image(self, image_name, mask_name, rotate=True):
-        with Image.open(image_name) as image, Image.open(mask_name) as mask:
-            x_image = image.convert('L')
-            y_mask = mask.convert('L')
+    def load_image(self, image, mask, rotate=True):
+        # image / mask: uint8 HxW slices held in memory (same pixels as the former PNG files)
+        x_image = Image.fromarray(image).convert('L')
+        y_mask = Image.fromarray(mask).convert('L')
 
-            if rotate:
-                angle = random.choice([90, 180, 270])
-                x_image = x_image.rotate(angle)
-                y_mask = y_mask.rotate(angle)
+        if rotate:
+            angle = random.choice([90, 180, 270])
+            x_image = x_image.rotate(angle)
+            y_mask = y_mask.rotate(angle)
 
-            if self.args.model_name in ["mosa", "msavanilla"]:
-                x_image = self.transform_x_sam(x_image)
-                y_mask = self.transform_y_sam(y_mask)
-                x_image = x_image.repeat(3, 1, 1)
-            else:
-                x_image = self.transform_x_nnunet(x_image)
-                y_mask = self.transform_y_nnunet(y_mask)
+        if self.args.model_name in ["mosa", "msavanilla"]:
+            x_image = self.transform_x_sam(x_image)
+            y_mask = self.transform_y_sam(y_mask)
+            x_image = x_image.repeat(3, 1, 1)
+        else:
+            x_image = self.transform_x_nnunet(x_image)
+            y_mask = self.transform_y_nnunet(y_mask)
 
         return x_image, y_mask
 
-    def load_images(self, image_names, mask_names, rotate=True, max_workers=32):
+    def load_images(self, images, masks, rotate=True, max_workers=32):
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
-            pairs = list(executor.map(self.load_image, image_names, mask_names, [rotate] * len(image_names)))
+            pairs = list(executor.map(self.load_image, images, masks, [rotate] * len(images)))
         return pairs

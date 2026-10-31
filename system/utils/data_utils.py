@@ -3,32 +3,11 @@ import os
 import nibabel as nib
 import pydicom
 import cv2
-import imageio
 import random
-from torchvision import transforms
 import concurrent.futures
 from multiprocessing import cpu_count
-import hashlib
 import pickle
-
-def encode_string_sha256(input_string):
-    encoded = hashlib.sha256(input_string.encode()).hexdigest()
-    return encoded
-
-def apply_windowing(img, window_center=50, window_width=400):
-    min_value = window_center - window_width // 2
-    max_value = window_center + window_width // 2
-    img = np.clip(img, min_value, max_value)
-    return (img - min_value) / (max_value - min_value + 1e-8) * 255
-
-def process_image(image):
-    transform = transforms.Compose([
-        transforms.ToTensor(),
-        transforms.Resize((512, 512)),
-        transforms.Lambda(lambda x: x.float()),
-        transforms.Normalize(mean=[0.5], std=[0.5])
-    ])
-    return transform(image)
+import hashlib
 
 def normalize_image(img, modality):
     percentile_map = {
@@ -147,109 +126,105 @@ def load_slices(image_path_or_dir, mask_path_or_dir, modalities):
 
     raise ValueError(f"Unsupported input type: {image_path_or_dir}")
 
-def save_image_pair(img_slice, mask_slice, processed_dir, path_string, modality, vol_idx, slice_idx):
-    sample_id = encode_string_sha256(path_string)
-    img_id = modality + "_IMAGE_" + sample_id
-    mask_id = modality + "_MASK_" + sample_id
+TRAIN_FRACTION = 0.25        # share of every training volume's slices drawn afresh in each epoch
 
-    img_save_path = os.path.join(processed_dir, f"{img_id}_{vol_idx}_{slice_idx}.png")
-    mask_save_path = os.path.join(processed_dir, f"{mask_id}_{vol_idx}_{slice_idx}.png")
 
-    if not os.path.exists(img_save_path):
-        imageio.imwrite(img_save_path, img_slice)
-    if not os.path.exists(mask_save_path):
-        imageio.imwrite(mask_save_path, mask_slice)
-    return img_save_path, mask_save_path, modality
+def train_seed(dataset, dataset_id, idx, round, epoch):
+    """Deterministic seed of one client's training subset in one epoch of one round (same in every process)."""
+    key = f"{dataset}|{dataset_id}|{idx}|{round}|{epoch}"
+    return int(hashlib.sha256(key.encode()).hexdigest()[:16], 16)
 
-def get_seed(*args, cache_path="./seed_cache.pkl"):
-    key = "_".join(map(str, args))
 
-    if os.path.exists(cache_path):
-        with open(cache_path, "rb") as f:
-            seed_cache = pickle.load(f)
-    else:
-        seed_cache = {}
+def epoch_subset(volumes, seed, fraction=TRAIN_FRACTION):
+    """A fresh random int(n * fraction) slices of every training volume -> [(image, mask, modality), ...]."""
+    rng = random.Random(seed)
+    out = []
+    for modality, images, masks in volumes:
+        for i in rng.sample(range(len(images)), int(len(images) * fraction)):
+            out.append((images[i], masks[i], modality))
+    return out
 
-    if key in seed_cache:
-        #print(seed_cache[key])
-        return seed_cache[key]
 
-    seed_value = hash((args[0], args[1], args[2], args[3]))
+def subset_counts(volumes, fraction=TRAIN_FRACTION):
+    """Slices per modality in every epoch's subset (the same in every epoch)."""
+    counts = {}
+    for modality, images, _ in volumes:
+        counts[modality] = counts.get(modality, 0) + int(len(images) * fraction)
+    return counts
 
-    seed_cache[key] = seed_value
-    with open(cache_path, "wb") as f:
-        pickle.dump(seed_cache, f)
 
-    return seed_value
+def _load_png(path):
+    """Exactly what the training loop used to read from a saved PNG slice (8-bit grayscale)."""
+    from PIL import Image
+    with Image.open(path) as im:
+        return np.array(im.convert('L'))
 
-def random_subset(dataset, round, idx, dataset_id, list1, list2, percentage=1.0):
-    assert len(list1) == len(list2)
 
-    # Seed for reproducibility across rounds
-    random.seed(get_seed(dataset, round, idx, dataset_id))
-
-    # Zip with indices to track original positions
-    indexed_pairs = list(enumerate(zip(list1, list2)))
-    subset_size = int(len(indexed_pairs) * percentage)
-
-    # Random sampling with original indices
-    sampled = random.sample(indexed_pairs, subset_size)
-    indices, pairs = zip(*sampled) if sampled else ([], [])
-    subset1, subset2 = zip(*pairs) if pairs else ([], [])
-    return [list(subset1), list(subset2), list(indices)]
-
-def read_data(dataset, round, idx, dataset_id, data_split='train'):
-    version = 0.25
+def build_slices(dataset, idx, dataset_id, data_split):
+    """Val / test: every slice of the client's volumes as (image uint8 HxW, mask uint8 HxW {0,255}, modality).
+    The pixels are those of the PNG slices the previous pipeline wrote; an existing path cache (cache_*.pkl) is
+    reused with its order."""
     data_dir = os.path.join('../dataset', dataset)
+    old_cache = os.path.join(data_dir, f'cache_{idx}_{data_split}_{dataset_id}.pkl')
+
+    if os.path.exists(old_cache):
+        with open(old_cache, 'rb') as f:
+            path_list = pickle.load(f)
+        with concurrent.futures.ThreadPoolExecutor(max_workers=cpu_count()) as executor:
+            imgs = list(executor.map(_load_png, [p[0] for p in path_list]))
+            masks = list(executor.map(_load_png, [p[1] for p in path_list]))
+        return [(im, mk, p[2]) for im, mk, p in zip(imgs, masks, path_list)]
+
     file_path = os.path.join(data_dir, f'{data_split}{dataset_id}/', f'{idx}.npz')
-    if data_split == "train":
-        cache_file = os.path.join(data_dir, f'cache_{idx}_{round}_{data_split}_{dataset_id}_{version}.pkl')
-    else:
-        cache_file = os.path.join(data_dir, f'cache_{idx}_{data_split}_{dataset_id}.pkl')
-
-    if os.path.exists(cache_file):
-        with open(cache_file, 'rb') as f:
-            data_list = pickle.load(f)
-            return data_list
-
     with np.load(file_path, allow_pickle=True) as f:
         paths = f['data'].tolist()
 
     data_list = []
-    tasks = []
-
-    with concurrent.futures.ThreadPoolExecutor(max_workers=cpu_count()) as executor:
-        for vol_idx, (img_path, mask_path, modality) in enumerate(zip(paths['x'], paths['y'], paths['z'])):
-
-            img_slices, mask_slices = load_slices(img_path, mask_path, modality)
-
-            if data_split is not "train":
-                for slice_idx, (img_slice, mask_slice) in enumerate(zip(img_slices, mask_slices)):
-                    tasks.append(executor.submit(save_image_pair, img_slice, mask_slice, data_dir, img_path, modality, vol_idx, slice_idx))
-            else:
-                pair_subset = random_subset(dataset, round, idx, dataset_id, img_slices, mask_slices, percentage=version)
-                subset_imgs, subset_masks, subset_indices = pair_subset
-
-                for img_slice, mask_slice, slice_idx in zip(subset_imgs, subset_masks, subset_indices):
-                    tasks.append(executor.submit(save_image_pair, img_slice, mask_slice, data_dir, img_path, modality, vol_idx, slice_idx))
-
-
-        for future in concurrent.futures.as_completed(tasks):
-            img_save_path, mask_save_path, slice_modality = future.result()
-            data_list.append((img_save_path, mask_save_path, slice_modality))
-
-    with open(cache_file, 'wb') as f:
-        pickle.dump(data_list, f)
-
+    for img_path, mask_path, modality in zip(paths['x'], paths['y'], paths['z']):
+        img_slices, mask_slices = load_slices(img_path, mask_path, modality)
+        for img_slice, mask_slice in zip(img_slices, mask_slices):
+            data_list.append((np.ascontiguousarray(img_slice, dtype=np.uint8),
+                              np.ascontiguousarray(mask_slice, dtype=np.uint8), modality))
     return data_list
 
+
+def read_data(dataset, idx, dataset_id, data_split):
+    """Val / test slices, built once into ../dataset/<dataset>/slices_<idx>_<split>_<dataset_id>.pkl."""
+    slice_file = os.path.join('../dataset', dataset, f'slices_{idx}_{data_split}_{dataset_id}.pkl')
+    if os.path.exists(slice_file):
+        with open(slice_file, 'rb') as f:
+            return pickle.load(f)
+    data_list = build_slices(dataset, idx, dataset_id, data_split)
+    with open(slice_file, 'wb') as f:
+        pickle.dump(data_list, f, protocol=pickle.HIGHEST_PROTOCOL)
+    return data_list
+
+
+def read_train_volumes(dataset, idx, dataset_id):
+    """All slices of the client's training volumes, kept per volume: [(modality, [image], [mask]), ...] (uint8 HxW).
+    Built once into ../dataset/<dataset>/slices_<idx>_train_<dataset_id>_volumes.pkl; every epoch draws its own
+    subset with epoch_subset()."""
+    data_dir = os.path.join('../dataset', dataset)
+    vol_file = os.path.join(data_dir, f'slices_{idx}_train_{dataset_id}_volumes.pkl')
+    if os.path.exists(vol_file):
+        with open(vol_file, 'rb') as f:
+            return pickle.load(f)
+
+    with np.load(os.path.join(data_dir, f'train{dataset_id}/', f'{idx}.npz'), allow_pickle=True) as f:
+        paths = f['data'].tolist()
+    volumes = []
+    for img_path, mask_path, modality in zip(paths['x'], paths['y'], paths['z']):
+        img_slices, mask_slices = load_slices(img_path, mask_path, modality)
+        volumes.append((modality,
+                        [np.ascontiguousarray(m, dtype=np.uint8) for m in img_slices],
+                        [np.ascontiguousarray(m, dtype=np.uint8) for m in mask_slices]))
+    with open(vol_file, 'wb') as f:
+        pickle.dump(volumes, f, protocol=pickle.HIGHEST_PROTOCOL)
+    return volumes
+
+
 def read_client_data(dataset, round, idx, dataset_id, data_split='train'):
+    """train: the client's training volumes (see read_train_volumes); val / test: lists of slices."""
     if data_split == 'train':
-        train_data = read_data(dataset, round, idx, dataset_id, 'train')
-        return train_data
-    elif data_split == 'test':
-        test_data = read_data(dataset, round, idx, dataset_id, 'test')
-        return test_data
-    else:
-        val_data = read_data(dataset, round, idx, dataset_id, 'val')
-        return val_data
+        return read_train_volumes(dataset, idx, dataset_id)
+    return read_data(dataset, idx, dataset_id, 'test' if data_split == 'test' else 'val')

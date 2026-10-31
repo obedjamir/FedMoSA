@@ -1,5 +1,7 @@
 # FedMoSA: Federated Medical Image Segmentation under Modality Heterogeneity via Specialized Adapters
 
+[[Paper (MICCAI 2026)]](https://link.springer.com/chapter/10.1007/978-3-032-38072-2_20)
+
 This repository provides the official implementation of **FedMoSA**, a federated learning framework designed to address **modality heterogeneity** across distributed clients for medical image segmentation.
 
 The framework supports segmentation experiments on medical imaging datasets (liver, brain) and enables fair comparison with several federated learning baselines.
@@ -37,6 +39,18 @@ Within each dataset script, the following parameters can be modified:
 - Output directory paths
 
 All parameters are defined directly inside the corresponding script.
+
+### Building the Slices
+
+Training reads each client's 2D slices from memory. They are built once from the generated splits:
+`dataset/<data>/slices_<client>_train_<run>_volumes.pkl` holds every slice of every training volume, and
+`slices_<client>_<val|test>_<run>.pkl` the evaluation slices. Every local epoch trains on a fresh random 25% of each
+training volume's slices (seeded by dataset, run, client, round and epoch, so runs are reproducible).
+`main.py` builds a missing file on first use; to build all of them up front, run from `system/`:
+
+```bash
+python3 prepare_data.py -data liver_seg -nc 5
+```
 
 ---
 
@@ -137,3 +151,15 @@ Experiment outputs and logs are saved to the `results/` directory. Training logs
 - Experiments are executed asynchronously using `nohup`.
 - Training logs are saved to `.log` files (e.g., `FedSAM_liver_5_mosa_1.log`).
 - GPU selection is controlled via the `-gpu` argument.
+
+## NVIDIA FLARE
+
+An NVIDIA FLARE implementation of FedMoSA is in [`nvflare/`](nvflare/README.md): a custom server workflow
+(modality-restricted and modality-balanced aggregation, prototype exchange) with Client API training. It uses the
+same slices (`prepare_data.py`), transforms and batching as this implementation:
+
+```bash
+cd system && python3 prepare_data.py -data liver_seg -nc 3
+cd ../nvflare && pip install -r requirements.txt
+python job.py --data-dir ../dataset/liver_seg --sam-ckpt sam_vit_b_01ec64.pth --num-rounds 50 --gpu 0,1,2
+```
