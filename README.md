@@ -137,3 +137,7 @@ Experiment outputs and logs are saved to the `results/` directory. Training logs
 - Experiments are executed asynchronously using `nohup`.
 - Training logs are saved to `.log` files (e.g., `FedSAM_liver_5_mosa_1.log`).
 - GPU selection is controlled via the `-gpu` argument.
+
+## NVFlare
+
+An NVIDIA FLARE implementation of FedMoSA (custom server workflow + Client API) is in [`nvflare/`](nvflare/README.md).
