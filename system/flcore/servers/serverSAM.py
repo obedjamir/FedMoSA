@@ -85,7 +85,7 @@ class FedSAM(Server):
             print("Loading Previous Checkpoint...")
             for client in self.clients:
                 client.current_round = self.args.prev_round
-                state_dict = torch.load(f"FedSAM/{self.args.dataset[0:9]}-{self.args.model_name}-num_clients:{self.args.num_clients}-{client.id}-{self.args.goal}-{self.times}.pth", map_location="cpu")
+                state_dict = torch.load(f"FedSAM/{self.args.dataset}-{self.args.model_name}-num_clients:{self.args.num_clients}-{client.id}-{self.args.goal}-{self.times}.pth", map_location="cpu")
                 client.model.load_state_dict(state_dict)
                 client.model.to(self.args.device)
                 client.load_train_data()
@@ -149,7 +149,7 @@ class FedSAM(Server):
                 
         print("==> Evaluating model Accuracy...", flush=True)
         for client in self.clients:
-            client.model.load_state_dict(torch.load(f"FedSAM/{self.args.dataset[0:9]}-{self.args.model_name}-num_clients:{self.args.num_clients}-{client.id}-{self.args.goal}-{self.times}.pth", map_location="cpu"))
+            client.model.load_state_dict(torch.load(f"FedSAM/{self.args.dataset}-{self.args.model_name}-num_clients:{self.args.num_clients}-{client.id}-{self.args.goal}-{self.times}.pth", map_location="cpu"))
         self.evaluate(val=False)
 
         self.save_results(fn=self.hist_result_fn)
