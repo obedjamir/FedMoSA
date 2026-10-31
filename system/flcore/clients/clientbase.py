@@ -186,7 +186,7 @@ class TopIoUOverlayCollector:
                 )
 
 class MergedDataset(Dataset):
-    def __init__(self, datasets_by_modality, batch_size, drop_last=True):
+    def __init__(self, datasets_by_modality, batch_size):
         self.batch_size = batch_size
 
         # Store datasets
@@ -197,7 +197,7 @@ class MergedDataset(Dataset):
         self.num_batches = {}
 
         for modality, ds in self.datasets.items():
-            n_batches = len(ds) // batch_size if drop_last else -(-len(ds) // batch_size)
+            n_batches = len(ds) // batch_size
             self.num_batches[modality] = n_batches
             self.batched_data[modality] = ds[: n_batches * batch_size]
 
@@ -395,9 +395,16 @@ class Client(object):
         for item in self.test_data:
             modality_data.setdefault(item[2], []).append(item)
 
+        for m in modality_data:
+            random.shuffle(modality_data[m])
+
+        for m in modality_data:
+            num_batches = len(modality_data[m]) // batch_size
+            modality_data[m] = modality_data[m][: num_batches * batch_size]
+
         print(f"Client {self.id} test data → " + ", ".join(f"{m}: {len(v)}" for m, v in modality_data.items()))
 
-        merged_dataset = MergedDataset(modality_data, batch_size=batch_size, drop_last=False)
+        merged_dataset = MergedDataset(modality_data, batch_size=batch_size)
         return DataLoader(merged_dataset, batch_size=1, shuffle=False, collate_fn=lambda batch: batch[0])
 
     def load_val_data(self, batch_size=None):
@@ -411,9 +418,16 @@ class Client(object):
             for item in self.val_data:
                 modality_data.setdefault(item[2], []).append(item)
 
+            for m in modality_data:
+                random.shuffle(modality_data[m])
+
+            for m in modality_data:
+                num_batches = len(modality_data[m]) // batch_size
+                modality_data[m] = modality_data[m][: num_batches * batch_size]
+
             print(f"Client {self.id} val data → " + ", ".join(f"{m}: {len(v)}" for m, v in modality_data.items()))
 
-            merged_dataset = MergedDataset(modality_data, batch_size=batch_size, drop_last=False)
+            merged_dataset = MergedDataset(modality_data, batch_size=batch_size)
             return DataLoader(merged_dataset, batch_size=1, shuffle=False, collate_fn=lambda batch: batch[0])
 
         batch_size = min(batch_size, len(self.val_data))
@@ -436,7 +450,7 @@ class Client(object):
 
         with torch.no_grad():
             for i, (x, y, z) in enumerate(testloaderfull):
-                image_mask_pairs = self.load_images(x, y, rotate=False)
+                image_mask_pairs = self.load_images(x, y)
                 images, masks = zip(*image_mask_pairs)
 
                 x = torch.stack(list(images)).to(self.device)
@@ -454,6 +468,10 @@ class Client(object):
                 dice_loss = self.dice(output, y_true)
                 main_loss = self.bce_scaling * bce_loss + self.dice_scaling * dice_loss
                 total_loss = main_loss
+
+                proto_loss = self.compute_prototype_alignment_loss()
+                if proto_loss is not None:
+                    total_loss += 0.1 * proto_loss
 
                 test_loss += total_loss.item()
 
