@@ -515,10 +515,6 @@ class MoSA(nn.Module):
             ]):
                 p.requires_grad = False
 
-        # no prompts are used: the prompt encoder stays frozen (only adapters and mask decoder are trained)
-        for p in self.sam.prompt_encoder.parameters():
-            p.requires_grad = False
-
     def _inject_adapters(self, sam_model, adapter_reduction, use_checkpoint, modalities):
         blocks = sam_model.image_encoder.blocks
         hidden_size = blocks[0].mlp.lin1.in_features

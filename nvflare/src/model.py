@@ -99,14 +99,27 @@ class MoSABlock(nn.Module):
         return {k: v / self.proto_count for k, v in self.proto_sum.items()}
 
 
+def reinit_(module):
+    """Re-initialize every layer of a module with PyTorch's default initialization."""
+    for m in module.modules():
+        if hasattr(m, "reset_parameters"):
+            m.reset_parameters()
+        elif hasattr(m, "weight") and hasattr(m, "bias") and m.weight is not None and m.weight.dim() == 1:
+            nn.init.ones_(m.weight)  # SAM's LayerNorm2d
+            nn.init.zeros_(m.bias)
+
+
 class MoSA(nn.Module):
-    def __init__(self, checkpoint=None, modalities=("MR", "CT"), reduction=16):
+    def __init__(self, checkpoint=None, modalities=("MR", "CT"), reduction=16, decoder_init="random"):
         super().__init__()
         # kept as attributes: FedJob rebuilds the server's initial model from them when the job is exported
         self.checkpoint = checkpoint
         self.reduction = reduction
         self.modalities = list(modalities)
+        self.decoder_init = decoder_init
         self.sam = sam_model_registry["vit_b"](checkpoint=checkpoint)
+        if decoder_init == "random":  # the mask decoder is trained from scratch (prompt-free segmentation)
+            reinit_(self.sam.mask_decoder)
         blocks = self.sam.image_encoder.blocks
         dim = blocks[0].mlp.lin1.in_features
         for i, blk in enumerate(blocks):
@@ -114,8 +127,10 @@ class MoSA(nn.Module):
         for name, p in self.sam.image_encoder.named_parameters():
             if "adapter" not in name:
                 p.requires_grad = False
-        for p in self.sam.prompt_encoder.parameters():  # no prompts are used; kept frozen
-            p.requires_grad = False
+        # no prompts are used: of the prompt encoder only the no-mask embedding enters the forward pass; it is
+        # trained (and aggregated), the rest of the prompt encoder stays fixed
+        for name, p in self.sam.prompt_encoder.named_parameters():
+            p.requires_grad = name.startswith("no_mask_embed")
 
     @property
     def blocks(self):
@@ -140,7 +155,7 @@ class MoSA(nn.Module):
         return masks
 
     def trainable_state(self):
-        """Parameters exchanged with the server (adapters, mask decoder)."""
+        """Parameters exchanged with the server (adapters, mask decoder, no-mask embedding)."""
         return {n: p.detach().cpu() for n, p in self.named_parameters() if p.requires_grad}
 
     def current_prototypes(self):

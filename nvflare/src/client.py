@@ -73,6 +73,7 @@ def main():
     ap.add_argument("--dataset-id", default="0")
     ap.add_argument("--sites", default="", help="all site names in order; the k-th site reads client k's data")
     ap.add_argument("--sam-ckpt", default=None)
+    ap.add_argument("--decoder-init", default="random", choices=["random", "pretrained"])
     ap.add_argument("--modalities", default="MR,CT")
     ap.add_argument("--local-epochs", type=int, default=2)
     ap.add_argument("--batch-size", type=int, default=8)
@@ -93,7 +94,7 @@ def main():
         raise ValueError(f"cannot map site '{site}' to a client index; pass all site names with --sites")
     set_seed(32)
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    model = MoSA(args.sam_ckpt or None, args.modalities.split(",")).to(device)
+    model = MoSA(args.sam_ckpt or None, args.modalities.split(","), decoder_init=args.decoder_init).to(device)
     dataset = os.path.basename(os.path.normpath(args.data_dir))  # e.g. liver_seg (part of the subset seed)
     volumes = load_split(args.data_dir, client_idx, "train", args.dataset_id)
     val = load_split(args.data_dir, client_idx, "val", args.dataset_id)

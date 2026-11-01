@@ -42,6 +42,12 @@ def main():
     ap.add_argument("--sites", default="site-1,site-2,site-3")
     ap.add_argument("--modalities", default="MR,CT")
     ap.add_argument("--sam-ckpt", default="", help="SAM ViT-B checkpoint (sam_vit_b_01ec64.pth or MedSAM)")
+    ap.add_argument(
+        "--decoder-init",
+        default="random",
+        choices=["random", "pretrained"],
+        help="mask decoder: trained from a random initialization (default) or from the SAM checkpoint",
+    )
     ap.add_argument("--num-rounds", type=int, default=50)
     ap.add_argument("--local-epochs", type=int, default=2)
     ap.add_argument("--batch-size", type=int, default=8)
@@ -62,7 +68,7 @@ def main():
     mods = args.modalities.split(",")
     job = FedJob(name="fedmosa")
     ckpt = os.path.abspath(args.sam_ckpt) if args.sam_ckpt else None  # absolute: the server runs in its workspace
-    comp_ids = job.to_server(PTModel(InitialModel(ckpt, mods)))
+    comp_ids = job.to_server(PTModel(InitialModel(ckpt, mods, decoder_init=args.decoder_init)))
     job.to_server(
         FedMoSAController(
             num_clients=len(sites),
@@ -82,6 +88,7 @@ def main():
         "--batch-size", str(args.batch_size),
         "--lr", str(args.lr),
         "--lam-proto", str(args.lam_proto),
+        "--decoder-init", args.decoder_init,
     ]  # fmt: skip
     if ckpt:
         script_args += ["--sam-ckpt", ckpt]
