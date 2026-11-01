@@ -80,25 +80,23 @@ A short functional run of this example on the paper's liver setting with the mos
 
 | Item | Value |
 | --- | --- |
-| Tested version | earlier revision of this example (to be updated with the repeated run) |
+| Tested version | [`5df0e65`](https://github.com/obedjamir/FedMoSA/tree/5df0e65/nvflare) |
 | Environment | NVIDIA H200 (140 GB), Python 3.10, NVFlare 2.9.0, simulator with 5 clients |
 | Data | 5 clients: MR-only (sites 1–3: 828 / 821 / 777 training slices per epoch) and CT-only (sites 4–5: 4058 / 3927); val / test 354–2253 slices per client |
-| Command | `python job.py --data-dir ../dataset/liver_seg --dataset-id 4 --sites site-1,site-2,site-3,site-4,site-5 --sam-ckpt sam_vit_b_01ec64.pth --num-rounds 5 --gpu <gpus>` (defaults: 2 local epochs, batch size 8, lr 1e-4) |
-| Run time | about 4 h 20 min for 5 rounds plus the final evaluation |
+| Command | `python job.py --data-dir ../dataset/liver_seg --dataset-id 4 --sites site-1,site-2,site-3,site-4,site-5 --sam-ckpt $(pwd)/sam_vit_b_01ec64.pth --num-rounds 5 --gpu <gpus>` (defaults: 2 local epochs, batch size 8, lr 1e-4) |
+| Run time | about 2 h 40 min for 5 rounds plus the final evaluation |
 | Observed result | Every round aggregated all 5 clients; the test Dice of the global model rose on every client (table below) |
 | Limitations | Functional check with 5 rounds, not a reproduction of the paper's training length; one run. Each client trains a full SAM ViT-B at 1024×1024 (about 30–40 GB of GPU memory at batch size 8). The k-th name in `--sites` reads client k−1's files. |
-
-> Note: this run predates later fixes to the example; it will be repeated with the current version.
 
 Test IoU / Dice of the global model (after round 1 = after the first aggregation; final = after round 5):
 
 | Site | Modality | After round 1 | After round 3 | Final |
 | --- | --- | --- | --- | --- |
-| site-1 | MR | 0.377 / 0.538 | 0.637 / 0.774 | 0.683 / 0.807 |
-| site-2 | MR | 0.425 / 0.592 | 0.731 / 0.842 | 0.762 / 0.863 |
-| site-3 | MR | 0.441 / 0.608 | 0.707 / 0.825 | 0.741 / 0.848 |
-| site-4 | CT | 0.659 / 0.791 | 0.779 / 0.873 | 0.807 / 0.892 |
-| site-5 | CT | 0.682 / 0.807 | 0.769 / 0.866 | 0.805 / 0.888 |
+| site-1 | MR | 0.345 / 0.497 | 0.571 / 0.719 | 0.568 / 0.717 |
+| site-2 | MR | 0.446 / 0.611 | 0.720 / 0.835 | 0.696 / 0.818 |
+| site-3 | MR | 0.477 / 0.638 | 0.681 / 0.806 | 0.684 / 0.809 |
+| site-4 | CT | 0.671 / 0.798 | 0.774 / 0.870 | 0.791 / 0.881 |
+| site-5 | CT | 0.668 / 0.795 | 0.773 / 0.867 | 0.789 / 0.878 |
 
 ## Results
 
