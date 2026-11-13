@@ -73,6 +73,23 @@ From round 1 on, every client logs the val and test IoU / Dice of the global mod
 the last round the final global model is evaluated the same way. `--export-only` writes the job folder to
 `<workspace>/jobs` for `nvflare job submit` (POC or production).
 
+### Exported jobs (POC or production)
+
+```bash
+python job.py --export-only --sites site-1,site-2,site-3 --sam-ckpt sam_vit_b_01ec64.pth
+```
+
+Data and checkpoint paths are site-local and are not part of the job. Before a site starts, set:
+
+| Variable | Where | Value |
+| --- | --- | --- |
+| `FEDMOSA_DATA_DIR` | every client | folder with that client's `slices_<k>_*.pkl` |
+| `FEDMOSA_SAM_CKPT` | every client and the server | SAM ViT-B checkpoint |
+
+The paths may differ between machines. A client stops with a clear error if its folder or checkpoint is missing.
+The job starts only when all sites in `--sites` have joined (`min_clients` and `mandatory_clients`), so no modality
+is left out. Site and modality names must not contain whitespace.
+
 ## Validation
 
 A short functional run of this example on the paper's liver setting with the most heterogeneous split
@@ -80,23 +97,23 @@ A short functional run of this example on the paper's liver setting with the mos
 
 | Item | Value |
 | --- | --- |
-| Tested version | [`2e45d5e`](https://github.com/obedjamir/FedMoSA/tree/2e45d5e/nvflare) |
+| Tested version | [`dadffb5`](https://github.com/obedjamir/FedMoSA/tree/dadffb5/nvflare) |
 | Environment | NVIDIA H200 (140 GB), Python 3.10, NVFlare 2.9.0, simulator with 5 clients |
 | Data | 5 clients: MR-only (sites 1–3: 828 / 821 / 777 training slices per epoch) and CT-only (sites 4–5: 4058 / 3927); val / test 354–2253 slices per client |
-| Command | `python job.py --data-dir ../dataset/liver_seg --dataset-id 4 --sites site-1,site-2,site-3,site-4,site-5 --sam-ckpt $(pwd)/sam_vit_b_01ec64.pth --num-rounds 5 --gpu <gpus>` (defaults: 2 local epochs, batch size 8, lr 1e-4) |
-| Run time | about 3 h 30 min for 5 rounds plus the final evaluation |
-| Observed result | Every round aggregated all 5 clients; the test Dice of the global model rose on every client (table below) |
+| Command | `FEDMOSA_DATA_DIR=<abs path>/dataset/liver_seg FEDMOSA_SAM_CKPT=<abs path>/sam_vit_b_01ec64.pth python job.py --dataset-id 4 --sites site-1,site-2,site-3,site-4,site-5 --num-rounds 5 --gpu <gpus>` (defaults: 2 local epochs, batch size 8, lr 1e-4) |
+| Run time | about 2 h 15 min for 5 rounds plus the final evaluation |
+| Observed result | Every round aggregated all 5 clients; the test Dice of the global model rose on every client (table below); the final validation metrics of every site are logged by the server |
 | Limitations | Functional check with 5 rounds, not a reproduction of the paper's training length; one run. Each client trains a full SAM ViT-B at 1024×1024 (about 30–40 GB of GPU memory at batch size 8). The k-th name in `--sites` reads client k−1's files. |
 
 Test IoU / Dice of the global model (after round 1 = after the first aggregation; final = after round 5):
 
 | Site | Modality | After round 1 | After round 3 | Final |
 | --- | --- | --- | --- | --- |
-| site-1 | MR | 0.459 / 0.621 | 0.624 / 0.761 | 0.670 / 0.798 |
-| site-2 | MR | 0.568 / 0.722 | 0.729 / 0.840 | 0.776 / 0.872 |
-| site-3 | MR | 0.556 / 0.712 | 0.696 / 0.816 | 0.737 / 0.845 |
-| site-4 | CT | 0.640 / 0.777 | 0.747 / 0.852 | 0.799 / 0.887 |
-| site-5 | CT | 0.680 / 0.805 | 0.767 / 0.865 | 0.808 / 0.891 |
+| site-1 | MR | 0.499 / 0.660 | 0.656 / 0.787 | 0.700 / 0.819 |
+| site-2 | MR | 0.610 / 0.755 | 0.746 / 0.852 | 0.782 / 0.876 |
+| site-3 | MR | 0.554 / 0.711 | 0.723 / 0.836 | 0.765 / 0.865 |
+| site-4 | CT | 0.633 / 0.771 | 0.773 / 0.869 | 0.786 / 0.878 |
+| site-5 | CT | 0.668 / 0.796 | 0.775 / 0.869 | 0.793 / 0.882 |
 
 ## Results
 

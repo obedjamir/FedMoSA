@@ -69,10 +69,10 @@ def fmt(r):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--data-dir", required=True, help="dataset folder with the slices_*.pkl files")
+    ap.add_argument("--data-dir", default="", help="dataset folder with the slices_*.pkl files (default: $FEDMOSA_DATA_DIR)")
     ap.add_argument("--dataset-id", default="0")
     ap.add_argument("--sites", default="", help="all site names in order; the k-th site reads client k's data")
-    ap.add_argument("--sam-ckpt", default=None)
+    ap.add_argument("--sam-ckpt", default="", help="SAM ViT-B checkpoint (default: $FEDMOSA_SAM_CKPT)")
     ap.add_argument("--decoder-init", default="random", choices=["random", "pretrained"])
     ap.add_argument("--modalities", default="MR,CT")
     ap.add_argument("--local-epochs", type=int, default=2)
@@ -82,6 +82,15 @@ def main():
     ap.add_argument("--lam-dice", type=float, default=0.5)
     ap.add_argument("--lam-proto", type=float, default=0.01)
     args = ap.parse_args()
+    if args.local_epochs < 1 or args.batch_size < 1:
+        raise ValueError("--local-epochs and --batch-size must be positive")
+    # site-local resources: each site points to its own copies (paths may differ between sites)
+    args.data_dir = args.data_dir or os.environ.get("FEDMOSA_DATA_DIR", "")
+    args.sam_ckpt = args.sam_ckpt or os.environ.get("FEDMOSA_SAM_CKPT", "")
+    if not args.data_dir or not os.path.isdir(args.data_dir):
+        raise FileNotFoundError(f"data folder '{args.data_dir}' not found on this site (set FEDMOSA_DATA_DIR)")
+    if args.sam_ckpt and not os.path.isfile(args.sam_ckpt):
+        raise FileNotFoundError(f"SAM checkpoint '{args.sam_ckpt}' not found on this site (set FEDMOSA_SAM_CKPT)")
 
     flare.init()
     site = flare.get_site_name()
@@ -106,9 +115,13 @@ def main():
         )
     counts = {m: 0 for m in model.modalities}
     counts.update(subset_counts(volumes))  # slices per epoch (a fresh 25% of every training volume)
-    if sum(counts.values()) < args.batch_size:
+    # batches hold one modality and drop each modality's incomplete last batch (the paper's batching), so a
+    # modality with fewer slices than one batch contributes no step; the round must have at least one step
+    steps_per_epoch = sum(n // args.batch_size for n in counts.values())
+    if steps_per_epoch < 1:
         raise ValueError(
-            f"{site}: {sum(counts.values())} training slices per epoch, fewer than one batch " f"({args.batch_size})"
+            f"{site}: no full batch of {args.batch_size} slices in any modality (slices per epoch: {counts}); "
+            f"lower --batch-size"
         )
     print(f"[{site}] client {client_idx}: train {counts}, val {len(val or [])}, test {len(test or [])}", flush=True)
     opt = torch.optim.Adam([p for p in model.parameters() if p.requires_grad], lr=args.lr)
@@ -146,6 +159,8 @@ def main():
                 opt.step()
                 steps += 1
 
+        if steps == 0:  # cannot happen after the check above; never send an untrained round
+            raise RuntimeError(f"{site}: round {rnd} ran no training step")
         protos = [{k: v.cpu().tolist() for k, v in p.items()} for p in model.mean_prototypes()]  # meta: plain lists
         flare.send(
             FLModel(
