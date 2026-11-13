@@ -42,18 +42,43 @@ class FedMoSAController(ModelController):
         self.num_rounds = num_rounds
         self.modalities = list(modalities)
 
+    def aborted(self, where):
+        if self.abort_signal is not None and self.abort_signal.triggered:
+            self.info(f"FedMoSA aborted {where}: nothing is aggregated or saved.")
+            return True
+        return False
+
+    def cohort(self):
+        """All configured clients; the job never runs a round with fewer (a modality could be missing)."""
+        clients = self.sample_clients(self.num_clients)
+        if len(clients) != self.num_clients:
+            raise RuntimeError(f"{len(clients)} clients available, the job needs all {self.num_clients}")
+        return clients
+
     def run(self):
         self.info("Start FedMoSA.")
         model = self.load_model()
+        model.total_rounds = self.num_rounds
         for rnd in range(self.num_rounds):
+            if self.aborted(f"before round {rnd}"):
+                return
             self.info(f"Round {rnd}")
             model.current_round = rnd
-            clients = self.sample_clients(self.num_clients)
-            results = self.send_model_and_wait(targets=clients, data=model)
+            results = self.send_model_and_wait(targets=self.cohort(), data=model)
+            if self.aborted(f"during round {rnd}"):  # partial responses: the round is discarded
+                return
+            if len(results) != self.num_clients:
+                raise RuntimeError(f"Round {rnd}: {len(results)} of {self.num_clients} client results received")
             model = self.aggregate(results, model, rnd)
             self.save_model(model)
+        if self.aborted("before the final validation"):
+            return
         # evaluate the final global model on every client's val / test split
-        self.send_model_and_wait(task_name="validate", targets=self.sample_clients(self.num_clients), data=model)
+        results = self.send_model_and_wait(task_name="validate", targets=self.cohort(), data=model)
+        if self.aborted("during the final validation"):
+            return
+        for r in results:
+            self.info(f"Final global model, {r.meta.get('client_name', '?')}: {r.metrics}")
         self.info("Finished FedMoSA.")
 
     def aggregate(self, results, global_model, rnd):
@@ -100,4 +125,4 @@ class FedMoSAController(ModelController):
                 )
         mods = {m: sum(c.get(m, 0) for c in counts) for m in self.modalities}
         self.info(f"Round {rnd}: aggregated {len(results)} clients, samples per modality {mods}")
-        return FLModel(params=params, meta={"prototypes": protos}, current_round=rnd)
+        return FLModel(params=params, meta={"prototypes": protos}, current_round=rnd, total_rounds=self.num_rounds)

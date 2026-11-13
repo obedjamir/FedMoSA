@@ -73,6 +73,23 @@ From round 1 on, every client logs the val and test IoU / Dice of the global mod
 the last round the final global model is evaluated the same way. `--export-only` writes the job folder to
 `<workspace>/jobs` for `nvflare job submit` (POC or production).
 
+### Exported jobs (POC or production)
+
+```bash
+python job.py --export-only --sites site-1,site-2,site-3 --sam-ckpt sam_vit_b_01ec64.pth
+```
+
+Data and checkpoint paths are site-local and are not part of the job. Before a site starts, set:
+
+| Variable | Where | Value |
+| --- | --- | --- |
+| `FEDMOSA_DATA_DIR` | every client | folder with that client's `slices_<k>_*.pkl` |
+| `FEDMOSA_SAM_CKPT` | every client and the server | SAM ViT-B checkpoint |
+
+The paths may differ between machines. A client stops with a clear error if its folder or checkpoint is missing.
+The job starts only when all sites in `--sites` have joined (`min_clients` and `mandatory_clients`), so no modality
+is left out. Site and modality names must not contain whitespace.
+
 ## Validation
 
 A short functional run of this example on the paper's liver setting with the most heterogeneous split
